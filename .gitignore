@@ -233,3 +233,8 @@ conda/pkg
 # nix files
 .envrc
 *.nix
+
+# testing
+local_scripts
+*.csv
+*.pt
