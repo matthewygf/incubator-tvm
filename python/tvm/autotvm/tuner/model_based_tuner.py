@@ -25,6 +25,9 @@ import numpy as np
 
 from .tuner import Tuner
 from ..env import GLOBAL_SCOPE
+import logging
+
+logger = logging.getLogger("autotvm")
 
 class FeatureCache(object):
     """Feature cache manager for cache sharing between different cost models"""
@@ -201,11 +204,17 @@ class ModelBasedTuner(Tuner):
         self.space = task.config_space
         self.space_len = len(task.config_space)
         self.dims = [len(x) for x in self.space.space_map.values()]
-        print(self.dims)
         self.cost_model = cost_model
         self.model_optimizer = model_optimizer
         self.sampler = sampler
         self.diversity_filter_ratio = diversity_filter_ratio
+
+        logger.info(f"Task plan_size: {self.plan_size} \n \
+            Task space: {self.space} \n \
+            Task space length: {self.space_len} \n \
+            Task config space dims: {self.dims} \n \
+            Diversity filter ratio:  {self.diversity_filter_ratio} \n \
+            Sampler: {self.sampler}")
 
         if self.diversity_filter_ratio:
             assert self.diversity_filter_ratio >= 1, "Diversity filter ratio " \
@@ -220,8 +229,11 @@ class ModelBasedTuner(Tuner):
         # observed samples
         self.xs = []
         self.ys = []
+        self.all_res = []
         self.flops_max = 0.0
         self.train_ct = 0
+
+        self.index_costs = {}
 
     def next_batch(self, batch_size):
         ret = []
@@ -251,6 +263,8 @@ class ModelBasedTuner(Tuner):
         return ret
 
     def update(self, inputs, results):
+        logger.info(f"preparing xs and ys...")
+        
         for inp, res in zip(inputs, results):
             index = inp.config.index
             if res.error_no == 0:
@@ -258,13 +272,16 @@ class ModelBasedTuner(Tuner):
                 flops = inp.task.flop / np.mean(res.costs)
                 self.flops_max = max(self.flops_max, flops)
                 self.ys.append(flops)
+                self.all_res.append(res)
             else:
                 self.xs.append(index)
+                self.all_res.append(res)
                 self.ys.append(0.0)
 
         # if we have enough new training samples
         if len(self.xs) >= self.next_update \
                 and self.flops_max > 1e-6:
+            logger.info(f"Update: have enough samples {len(self.xs)} fitting model...")
             self.cost_model.fit(self.xs, self.ys, self.plan_size)
             if self.diversity_filter_ratio:
                 candidate = self.model_optimizer.find_maximums(
@@ -278,14 +295,22 @@ class ModelBasedTuner(Tuner):
                     self.cost_model, self.plan_size, self.visited)
 
             if self.sampler:
-                samples = [point2knob(config, self.dims) for config in maximums]
+
+                if self.sampler.trainable:
+                    self.sampler.fit(self.xs, self.all_res)
+
+                logger.info(f"Using Sampler to reduce samples...")
+                samples = [(point2knob(config, self.dims), config) for config in maximums]
                 reduced_samples = self.sampler.sample(samples, self.dims)
                 maximums = [knob2point(sample, self.dims) for sample in reduced_samples]
 
             self.trials = maximums
             self.trial_pt = 0
             self.train_ct += 1
-            self.next_update += len(maximums)    
+            self.next_update += len(maximums)  
+        else:
+            logger.info(f"update: not enough samples {len(self.xs)} expect {self.next_update} ... skipping")
+              
 
     def load_history(self, data_set):
         # set in_tuning as True to make the feature extraction consistent

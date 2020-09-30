@@ -86,6 +86,7 @@ class Tuner(object):
         results: Array of autotvm.measure.MeasureResult
             result for measurement
         """
+        raise NotImplementedError()
 
 
     def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G'):
@@ -152,7 +153,7 @@ class Tuner(object):
 
             i += len(results)
             self.ttl = min(early_stopping + self.best_iter, n_trial) - i
-
+            logger.info(f"starting to update tuner at iter {i}")
             self.update(inputs, results)
             for callback in callbacks:
                 callback(self, inputs, results)

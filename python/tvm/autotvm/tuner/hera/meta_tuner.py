@@ -1,12 +1,14 @@
 """Tuner that can have any optimizer with a sampler"""
 
-from python.tvm.autotvm.tuner.model_based_tuner import CostModel
+import logging
+from tvm.autotvm.tuner.model_based_tuner import CostModel
 from tvm.autotvm.tuner.model_based_tuner import ModelBasedTuner, ModelOptimizer
 from tvm.autotvm.tuner.sampler import Sampler
-
+from .neural_sampler import NeuralSampler
+from ..chameleon.adaptive_sampler import AdaptiveSampler
 
 class MetaTuner(ModelBasedTuner):
-    def __init__(self, task, cost_model, optimizer, plan_size=64,
+    def __init__(self, task, cost_model, optimizer, platform, plan_size=64,
                  sampler="neural",
                  diversity_filter_ratio=None) -> None:
 
@@ -19,7 +21,13 @@ class MetaTuner(ModelBasedTuner):
         if sampler == None:
             sampler = None
         elif sampler == 'neural':
-            sampler = NeuralSampler()
+            import os
+            current_path = os.path.abspath(__file__)
+            current_dir = os.path.dirname(current_path)
+            model_path = os.path.join(current_dir, "new_model.pt")
+            embed_path = os.path.join(current_dir, "train.csv")
+            logging.info(f"Path of model: {model_path}, Path of embedding: {embed_path}")
+            sampler = NeuralSampler(model_path, embed_path, task, platform)
         elif sampler == 'adaptive':
             sampler = AdaptiveSampler(plan_size)
         else:
