@@ -140,7 +140,9 @@ class NeuralSampler(Sampler):
         # 1. reconstruct the input 
         res = []
         rows = []
-        
+        if len(samples) == 0:
+            return res
+
         if not self.model and self.model_path:
             # prepare category features and padding indexes
             non_train=["arguments", "cand_name", "error", "index", "outliers", "candidate_time_cost_avg", "flop"]
@@ -202,7 +204,8 @@ class NeuralSampler(Sampler):
             similar_samples = similar_to(self.df, self.cand_id, self.platform_id, self.representations, embeddings.detach().numpy(), k=k)
             # logger.info(f"sim samples: {similar_samples}")
 
-            if len(similar_samples[similar_samples["outliers"] == 1]) >= k // 2:
+            # slightly over half
+            if len(similar_samples[similar_samples["outliers"] == 1]) >= k // 2 + 1:
                 remove_index.append(i)
         
         del samples_loader, samples_dataset
@@ -210,10 +213,13 @@ class NeuralSampler(Sampler):
         # remove from the full samples
         if len(remove_index) > 0:
             logger.info(f"removing : {remove_index}")
-        
-            return list(np.delete(np.array(res), remove_index))
-        
-
+            a = []
+            for i, configs in enumerate(res):
+                if i in remove_index:
+                    continue
+                a.append(configs)
+            logger.info(f"remain: {a}")
+            return a
         return res
 
     def obtain_cat_features(self, non_train_cols):
@@ -257,6 +263,8 @@ class NeuralSampler(Sampler):
             logger.info(f"{trains.flop.describe()}")
             self.model = self.train(trains, self.df["candidate_time_cost_avg"], cats_size, padding_indexes, epoch=self.train_epoch)
             self.update_embeddings(trains, self.df["candidate_time_cost_avg"])
+        else:
+            logger.info(f"train cnt: {self.train_cnt}")
         
             
     def preprocess(self, xs, results):
@@ -385,6 +393,8 @@ class NeuralSampler(Sampler):
         self.df["platform"] = self.df["platform"].apply(int_to_platform)
         embed_path = os.path.join(self.current_dir, "new_train.csv")
         self.df.to_csv(embed_path, index=False)
+        # quickly re-convert back so we can continue :/
+        self.df["platform"] = self.df["platform"].apply(platform_to_int)
 
 def transform_error(error_no):
     if error_no == 0:

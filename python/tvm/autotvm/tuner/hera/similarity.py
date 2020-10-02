@@ -1,14 +1,17 @@
 from scipy.spatial.distance import jaccard, cosine, euclidean, cityblock, dice
 
 def similar_to(df, op_id, platform, features_name, target_embedding, k=5, dis=cosine, strict=True):
-    temp_df = df.copy()
+    features = df
     if strict:
         # only compare within same operator/platform type
-        temp_df = temp_df[temp_df["cand_id"] == op_id]
-        temp_df = temp_df[temp_df["platform"] == platform]
-    features = temp_df[features_name]
+        features = df[df["cand_id"] == op_id]
+        features = features[features["platform"] == platform]
+
+    features = features[features_name]
     def score(row):
         return dis(row, target_embedding)
+    assert len(features) > 0, f'op {op_id}, platform {platform} \n {df.head()}'
+
     features["sim_score"] = features.apply(score, axis=1)
     features = features.sort_values(by="sim_score")
     
