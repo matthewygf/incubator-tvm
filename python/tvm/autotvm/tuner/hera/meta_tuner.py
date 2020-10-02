@@ -24,8 +24,13 @@ class MetaTuner(ModelBasedTuner):
             import os
             current_path = os.path.abspath(__file__)
             current_dir = os.path.dirname(current_path)
-            model_path = os.path.join(current_dir, "new_model.pt")
-            embed_path = os.path.join(current_dir, "train.csv")
+            model_path = os.path.join(current_dir, "newmodel.pt")
+            if not os.path.exists(model_path):
+                model_path = os.path.join(current_dir, "default.pt")
+            embed_path = os.path.join(current_dir, "new_train.csv")
+            if not os.path.exists(embed_path):
+                embed_path = os.path.join(current_dir, "default.csv")
+                
             logging.info(f"Path of model: {model_path}, Path of embedding: {embed_path}")
             sampler = NeuralSampler(model_path, embed_path, task, platform)
         elif sampler == 'adaptive':

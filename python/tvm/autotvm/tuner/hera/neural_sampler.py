@@ -31,6 +31,8 @@ from .model import *
 import pandas as pd 
 import logging
 from sklearn.model_selection import train_test_split
+from .similarity import similar_to
+import os
 
 logger = logging.getLogger("autotvm")
 
@@ -44,20 +46,24 @@ class NeuralSampler(Sampler):
                  task, 
                  platform, 
                  allow_train=True,
-                 train_epoch=1) -> None:
+                 train_epoch=2) -> None:
         self.model_path = model_path
-        self.model = torch.load(model_path)
         self.df = pd.read_csv(embedding_path)
         self.old_feature_space = list(self.df.columns)
+        self.column_order = self.old_feature_space
         self.platforms = list(self.df.platform.unique())
         self.num_platform = len(self.platforms)
-        self.platforms_to_int = {}
-        self.df.platform = self.df.platform.apply(self.platform_to_int)
         self.hashed_candidates = {}
         self.operators_candidates = list(self.df.cand_id.unique())
         self.task = task
         self.trainable = True
         self.preprocess_candidates()
+        self.eps = 0.99
+        self.train_cnt = 0
+        self.n_train = 5 # every n times the cost model has been updated
+        current_path = os.path.abspath(__file__)
+        self.current_dir = os.path.dirname(current_path)
+        self.model = None
         
         self.representations = []
         for f in self.old_feature_space:
@@ -65,36 +71,45 @@ class NeuralSampler(Sampler):
                 self.representations.append(f)
         logger.info(f"We will use feature space{self.representations}")
 
-        if self.platforms_to_int.get(platform, None) is None:
-            self.platforms_to_int[platform] = self.num_platform
+        if platform not in self.platforms:
+            self.platform_id = max(self.platforms) + 1
+            self.platforms.append(platform)
             self.num_platform+=1
-            logger.info(f"Number of platforms: {self.platforms_to_int}")
+        else:
+            self.platform_id = platform_to_int(platform)
+        logger.info(f"Current platform {self.platform_id} Number of platforms: {self.num_platform} --- {self.platforms}")
+
+        self.df["platform"] = self.df["platform"].apply(platform_to_int)
         self.task_config_space = task.config_space
         self.space_map_keys = list(self.task_config_space.space_map.keys())
-        feature_mappings = [True if k in self.old_feature_space else False for k in self.space_map_keys]
-        self.not_in_network = [ v for include, v in zip(feature_mappings, self.space_map_keys) if not include ]
-        self.require_train = len(self.not_in_network) > 0
+        self.not_in_network = []
+        for k in self.space_map_keys:
+            found = False
+            for of in self.old_feature_space:
+                if of.startswith(k):
+                    found = True
+                    break
+            if not found:
+                self.not_in_network.append(k)
+                
         self.allow_train = allow_train
         self.train_epoch = train_epoch
         logger.info(f"Features not in network: {self.not_in_network}")
         
-        if self.require_train:
-            # add the feature cols into the df.
-            self.to_add_cols = {}
-            for n in self.not_in_network:
-                space = self.task_config_space.space_map[n]
-                if isinstance(space, SplitSpace):
-                    self.to_add_cols[n] = space.num_output+1
-                    for i in range(1, space.num_output+1):
-                        # 9999 will be padding idx used in the network
-                        self.df[n+"_"+str(i)] = 9999
-                elif isinstance(space, OtherOptionSpace):
-                    # 2 will be the padding idx
-                    # NOTE: assuming otheroptionspace only have 0,1
-                    self.df[n] = len(space)
-                    self.to_add_cols[n] = len(space)
-                else:
-                    raise NotImplementedError()
+        self.to_add_cols = {}
+        for k, space in self.task_config_space.space_map.items():
+            if isinstance(space, SplitSpace):
+                self.to_add_cols[k] = space.num_output+1
+                for i in range(1, space.num_output+1):
+                    # 9999 will be padding idx used in the network
+                    self.df[k+"_"+str(i)] = 9999
+            elif isinstance(space, OtherOptionSpace):
+                # 2 will be the padding idx
+                # NOTE: assuming otheroptionspace only have 0,1
+                self.df[k] = len(space)
+                self.to_add_cols[k] = len(space)
+            else:
+                raise NotImplementedError()
                     
             logger.info(f"{self.df.head()}")
 
@@ -120,94 +135,144 @@ class NeuralSampler(Sampler):
             self.cand_id = self.hashed_candidates.get(self.hashed_task)
         logger.info(f"Hashed candidates to cand_id: {self.hashed_candidates}")
 
-    def platform_to_int(self, x):
-        if x == "intel_1080":
-            self.platforms_to_int[x] = 0
-            return 0
-        elif x == "amd_2080":
-            self.platforms_to_int[x] = 1
-            return 1
-        elif x == "intel_2080":
-            self.platforms_to_int[x] = 2
-            return 2
-        elif x == "intel_v100":
-            self.platforms_to_int[x] = 3
-            return 3
-        else:
-            cat = self.platforms_to_int.get(x, None)
-            if cat is None:
-                self.platforms_to_int[x] = self.num_platform
-                self.num_platform+=1
-                return self.num_platform
-
-            self.platforms_to_int[x] = cat
-            return cat
-
     def sample(self, samples, dims):
         """Samples using Neural Network"""
-        logger.info(f"Sampling.... from {samples}, dimensions: {dims}")
-        #TODO:
-        return samples
+        # 1. reconstruct the input 
+        res = []
+        rows = []
+        
+        if not self.model and self.model_path:
+            # prepare category features and padding indexes
+            non_train=["arguments", "cand_name", "error", "index", "outliers", "candidate_time_cost_avg", "flop"]
+            cat_features, cats_size, padding_indexes = self.prepare_cat_features(non_train)
+            self.model = WhateverModel(cats_size, padding_indexes, embedding_dims=10)
+            self.model.load_state_dict(torch.load(self.model_path))
 
+        for s in samples:
+            task_info = [
+                np.math.log1p(self.task.flop),
+                self.cand_id,
+                self.platform_id,
+                self.task.name,
+                str(self.task.args),
+                -1, 
+                transform_error(0),
+                0, #outlier default
+            ]
+
+            new_features = []
+            config = self.task_config_space.get(s[1])
+            for k,v in config._entity_map.items():
+                if isinstance(v, SplitEntity):
+                    for i in range(1, self.to_add_cols[k]):
+                        new_features.append(v.size[i-1])
+                elif isinstance(v, OtherOptionEntity):
+                    new_features.append(int(v.val))
+
+            remaining = len(self.df.columns) - len(task_info) - len(new_features)
+
+            old_features = [9999 for _ in range(remaining)]
+            all_feats = task_info+old_features+new_features
+            assert len(all_feats) == len(self.df.columns), f'Got {len(all_feats)} , \
+                                                             expected len(self.df.columns)'
+            rows.append(all_feats)
+            res.append(s[0])
+
+        dfs = pd.DataFrame(rows, columns=self.column_order)
+        non_used=["arguments", "cand_name", "error", "index", "outliers", "candidate_time_cost_avg", "flop"]
+        cat_features = self.obtain_cat_features(non_used)
+
+        # replace -1 indexes to 0 for category features
+        for c in cat_features:
+            dfs[c] = dfs[c].apply(lambda x: 0 if x == -1 else x)
+
+        logger.info(f"Samples DF: \n {dfs.head()}")
+        self.model.eval()
+        
+        samples_dataset = WhateverPredDs(dfs)
+        samples_loader = DataLoader(samples_dataset, batch_size=1, shuffle=False, drop_last=False)
+        remove_index=[]
+        k=5
+        for i, sample_tensor in enumerate(samples_loader):
+            p = np.random.random()
+            if p < self.eps:
+                continue
+            
+            embeddings = self.model(sample_tensor, True)
+            similar_samples = similar_to(self.df, self.cand_id, self.platform_id, self.representations, embeddings.detach().numpy(), k=k)
+            # logger.info(f"sim samples: {similar_samples}")
+
+            if len(similar_samples[similar_samples["outliers"] == 1]) >= k // 2:
+                remove_index.append(i)
+        
+        del samples_loader, samples_dataset
+
+        # remove from the full samples
+        if len(remove_index) > 0:
+            logger.info(f"removing : {remove_index}")
+        
+            return list(np.delete(np.array(res), remove_index))
+        
+
+        return res
+
+    def obtain_cat_features(self, non_train_cols):
+        cat_features = []
+        for c in list(self.df.columns):
+            if c.startswith("feature"):
+                continue
+
+            if c not in non_train_cols:
+                cat_features.append(c)
+        return cat_features
+
+    def prepare_cat_features(self, non_train_cols):
+        cat_features = self.obtain_cat_features(non_train_cols)
+        
+        logger.info(f"Category features {cat_features}")
+        self.df[cat_features] = self.df[cat_features].astype(int)
+        cats_size = {}
+        padding_indexes = {}
+        for c in cat_features:
+            m = max(self.df[c])
+            self.df[c] = self.df[c].apply(lambda x: 0 if x == -1 else x)
+            cats_size[c] = m+2
+            padding_indexes[c] = m+1
+        return cat_features, cats_size, padding_indexes
 
     def fit(self, xs, ys):
-        if self.require_train and self.allow_train:
+        self.eps = max(0.005, self.eps - 1)
+        self.train_cnt += 1
+
+        if self.allow_train and self.train_cnt % self.n_train == 0:
             logger.info(f"training the network first for {self.train_epoch} by appending the samples to the dataframes")
             self.preprocess(xs, ys)
 
-            # prepare for training
-            target = self.df["candidate_time_cost_avg"]
-            self.df.drop(["candidate_time_cost_avg"], axis=1, inplace=True)
-            non_train=["arguments", "cand_name", "error", "index"]
-            cat_features = []
-            for c in list(self.df.columns):
-                if c.startswith("feature"):
-                    continue
-
-                if c not in non_train and cat_features != "flop":
-                    cat_features.append(c)
-            
-            logger.info(f"Category features {cat_features}")
-            self.df[cat_features] = self.df[cat_features].astype(int)
-
-
-            # grep the size of the category and padding index
-            cats_size = {}
-            padding_indexes = {}
-            for c in cat_features:
-                m = max(self.df[c])
-                if m == -1:
-                    continue
-                
-                uniques= self.df[c].unique()
-                unique_length = len(uniques)
-                if unique_length == 2 and only_nan_and_whatever(uniques):
-                    self.df[c] = self.df[c].apply(lambda x: 0 if x == -1 else x)
-                cats_size[c] = m+2
-                padding_indexes[c] = m+1
+            # prepare category features and padding indexes
+            non_train=["arguments", "cand_name", "error", "index", "outliers", "candidate_time_cost_avg", "flop"]
+            cat_features, cats_size, padding_indexes = self.prepare_cat_features(non_train)
 
             logger.info(f"CategorySize: {cats_size} \n Padding Indexes: {padding_indexes}")
-
-            self.model = self.train(self.df[cat_features], target, cats_size, padding_indexes, epoch=self.train_epoch)
-            self.update_embeddings(cat_features, target)
+            trains = self.df[cat_features+["flop"]]
+            logger.info(f"{trains.flop.describe()}")
+            self.model = self.train(trains, self.df["candidate_time_cost_avg"], cats_size, padding_indexes, epoch=self.train_epoch)
+            self.update_embeddings(trains, self.df["candidate_time_cost_avg"])
+        
             
-
     def preprocess(self, xs, results):
         rows = []
         for i, s in enumerate(xs):
             task_info = [
                 np.math.log1p(self.task.flop),
                 self.cand_id,
-                self.num_platform,
+                self.platform_id,
                 self.task.name,
                 str(self.task.args),
-                np.mean(results[i].costs) * self.task.flop if results[i].error_no != 0 else -1, # mean costs
+                np.mean(results[i].costs) if results[i].error_no == 0 else -1, # mean costs
                 transform_error(results[i].error_no),
                 0, #outlier default
             ]
 
-            # Minus 7 task info above.
-            old_features = [9999 for _ in range(len(self.old_feature_space)-8)]
             new_features = []
             config = self.task_config_space.get(s)
             for k,v in config._entity_map.items():
@@ -216,11 +281,17 @@ class NeuralSampler(Sampler):
                         new_features.append(v.size[i-1])
                 elif isinstance(v, OtherOptionEntity):
                     new_features.append(int(v.val))
+
+            # Minus task info above.
+            old_features = [9999 for _ in range(len(self.column_order)-len(task_info) -len(new_features))]
             
             all_feats = task_info+old_features+new_features
             assert len(all_feats) == len(self.df.columns)
             rows.append(all_feats)
-        dfs = pd.DataFrame(rows, columns=list(self.df.columns))
+        self.column_order = list(self.df.columns)
+        dfs = pd.DataFrame(rows, columns=self.column_order)
+        logger.info(f"new rows: \n {dfs.tail()}")
+
         def interquantile_outlier(df):
             non_errors = df[df["error"] == "none"] 
             q1 = non_errors["candidate_time_cost_avg"].quantile(0.25)
@@ -233,16 +304,15 @@ class NeuralSampler(Sampler):
             return df
 
         # set up outliers
-        # logging.info(f"{dfs.head()}")
         dfs = dfs.groupby(["cand_id", "platform"]).apply(interquantile_outlier).reset_index()
-        # outunique = dfs["outliers"].unique()
-        # logging.info(f"{outunique}")
         self.df = pd.concat([dfs, self.df], ignore_index=True)
-        logger.info(self.df.columns)
-        # logger.info(f"{self.df.tail()}")
-
+        # NOTE: concat reshuffle the cols :/
+        self.df = self.df[self.column_order]
+        logger.info(self.df["candidate_time_cost_avg"].describe())
+        logger.info(f"finished prep: \n {self.df.tail()}")
 
     def train(self, xs, ys, category_size, padding_idxes, epoch=30):
+        # every time we train, we reduce the eps
         x_train, x_test, y_train, y_test = train_test_split(xs, ys, test_size=0.2, shuffle=True, random_state=2022)
         train_dataset = WhateverDS(x_train, y_train)
         val_dataset = WhateverDS(x_test, y_test)
@@ -250,11 +320,11 @@ class NeuralSampler(Sampler):
         lr_rate = 1e-2
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader  = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
-        model = WhateverModel(category_size,batch_size, padding_idxes, embedding_dims=10)
+        model = WhateverModel(category_size, padding_idxes, embedding_dims=10)
         opt = torch.optim.Adam(model.parameters(), lr=lr_rate)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=1, verbose=True, min_lr=1e-9)
         loss = torch.nn.MSELoss()
-        best_loss = 0.0
+        best_loss = 9999
         log_iter = 10
         model.train()
         for e in range(1,epoch+1):
@@ -287,18 +357,19 @@ class NeuralSampler(Sampler):
 
             logger.info(f"avg e {e+1}, val loss: {avg_loss}")
             sched.step(avg_loss)
-            if avg_loss < best_loss and e > 5:
-                torch.save(model.state_dict(), f"newmodel_{e}.pt")
+            if avg_loss < best_loss:
+                model_path = os.path.join(self.current_dir, "newmodel.pt")
+                self.model_path = model_path
+                torch.save(model.state_dict(), self.model_path)
                 best_loss = avg_loss
 
         del opt, sched, loss, train_loader, val_loader, val_dataset, train_dataset
         model.eval()
         return model
 
-
-    def update_embeddings(self, category_features, target, batch_size=512):
+    def update_embeddings(self, trains, target, batch_size=512):
         logger.info(f"Updating Embeddings ... {self.representations}")
-        who_dataset = WhateverDS(self.df[category_features], target)
+        who_dataset = WhateverDS(trains, target)
         dloader = DataLoader(who_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
         index = 0
         for i, (x,_) in enumerate(dloader):
@@ -310,7 +381,10 @@ class NeuralSampler(Sampler):
         logger.info("updated Embeddings ... ")
         logger.info(f"{self.df.tail()}")
         del who_dataset, dloader
-        self.df.to_csv("train.csv", index=False)
+        # re-convert the platform to string
+        self.df["platform"] = self.df["platform"].apply(int_to_platform)
+        embed_path = os.path.join(self.current_dir, "new_train.csv")
+        self.df.to_csv(embed_path, index=False)
 
 def transform_error(error_no):
     if error_no == 0:
@@ -329,6 +403,35 @@ def transform_error(error_no):
         return "build_timeout"
     else:
         raise NotImplementedError(error_no)
+
+def int_to_platform(x):
+    if x == 0:
+        return "intel_1080"
+    elif x == 1:
+        return "amd_2080"
+    elif x == 2:
+        return "intel_2080"
+    elif x == 3:
+        return "intel_v100"
+    elif x == 4:
+        return "i7laptop"
+    else:
+        raise NotImplementedError()
+
+def platform_to_int(x):
+    if x == "intel_1080":
+        return 0
+    elif x == "amd_2080":
+        return 1
+    elif x == "intel_2080":
+        return 2
+    elif x == "intel_v100":
+        return 3
+    elif x == "i7laptop":
+        return 4
+    else:
+        raise NotImplementedError()
+
 
 def only_nan_and_whatever(uniques):
     if -1 not in uniques:

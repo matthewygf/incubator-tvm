@@ -44,10 +44,9 @@ class WhateverDS(Dataset):
         return x, y
 
 class WhateverModel(torch.nn.Module):
-    def __init__(self, cat_feats, batch, padding_indexes, embedding_dims=10, hidden_dim=32):
+    def __init__(self, cat_feats, padding_indexes, embedding_dims=10, hidden_dim=32):
         super(WhateverModel, self).__init__()
         self.cat_feats = cat_feats
-        self.batch = batch
         self.embs = {}
         total = 0
         for i, (feat, size) in enumerate(self.cat_feats.items()):

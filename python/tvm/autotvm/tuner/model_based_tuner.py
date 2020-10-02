@@ -295,11 +295,9 @@ class ModelBasedTuner(Tuner):
                     self.cost_model, self.plan_size, self.visited)
 
             if self.sampler:
-
                 if self.sampler.trainable:
                     self.sampler.fit(self.xs, self.all_res)
 
-                logger.info(f"Using Sampler to reduce samples...")
                 samples = [(point2knob(config, self.dims), config) for config in maximums]
                 reduced_samples = self.sampler.sample(samples, self.dims)
                 maximums = [knob2point(sample, self.dims) for sample in reduced_samples]
