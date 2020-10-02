@@ -226,6 +226,8 @@ class NeuralSampler(Sampler):
                 a.append(configs)
             logger.info(f"remain: {a}")
             return a
+        else:
+            logger.info(f"remove index count: {len(remove_index)}")
         
         return res
 
@@ -394,7 +396,7 @@ class NeuralSampler(Sampler):
             self.df.loc[index:index+batch-1, self.representations] = embed_feats.detach().numpy().astype(np.float32)
             index += batch
         logger.info("updated Embeddings ... ")
-        logger.info(f"{self.df.tail()}")
+        # logger.info(f"{self.df.tail()}")
         del who_dataset, dloader
         # re-convert the platform to string
         self.df["platform"] = self.df["platform"].apply(int_to_platform)
