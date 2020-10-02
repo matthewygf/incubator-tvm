@@ -111,7 +111,7 @@ class NeuralSampler(Sampler):
             else:
                 raise NotImplementedError()
                     
-            logger.info(f"{self.df.head()}")
+        logger.info(f"{self.df.head()}")
 
     def preprocess_candidates(self):
         m = 0
@@ -264,7 +264,7 @@ class NeuralSampler(Sampler):
             self.model = self.train(trains, self.df["candidate_time_cost_avg"], cats_size, padding_indexes, epoch=self.train_epoch)
             self.update_embeddings(trains, self.df["candidate_time_cost_avg"])
         else:
-            logger.info(f"train cnt: {self.train_cnt}")
+            logger.info(f"train cnt: {self.train_cnt} | EPS: {self.eps}")
         
             
     def preprocess(self, xs, results):
