@@ -208,8 +208,11 @@ class NeuralSampler(Sampler):
             # logger.info(f"sim samples: {similar_samples}")
 
             # slightly over half
-            if len(similar_samples[similar_samples["outliers"] == 1]) >= k // 2 + 1:
+            out_counts = len(similar_samples[similar_samples["outliers"] == 1])
+            if out_counts >= k // 2 + 1:
                 remove_index.append(i)
+            else:
+                logger.info(f"not removing: {i} - counts: {out_counts}")
         
         del samples_loader, samples_dataset
 
@@ -223,6 +226,7 @@ class NeuralSampler(Sampler):
                 a.append(configs)
             logger.info(f"remain: {a}")
             return a
+        
         return res
 
     def obtain_cat_features(self, non_train_cols):
