@@ -58,7 +58,7 @@ class NeuralSampler(Sampler):
         self.task = task
         self.trainable = True
         self.preprocess_candidates()
-        self.eps = 0.99
+        self.eps = 0.79
         self.train_cnt = 0
         self.n_train = 5 # every n times the cost model has been updated
         current_path = os.path.abspath(__file__)
@@ -140,6 +140,9 @@ class NeuralSampler(Sampler):
         # 1. reconstruct the input 
         res = []
         rows = []
+
+        logger.info(f"Sampling: {len(samples)}")
+
         if len(samples) == 0:
             return res
 
@@ -188,7 +191,7 @@ class NeuralSampler(Sampler):
         for c in cat_features:
             dfs[c] = dfs[c].apply(lambda x: 0 if x == -1 else x)
 
-        logger.info(f"Samples DF: \n {dfs.head()}")
+        # logger.info(f"Samples DF: \n {dfs.head()}")
         self.model.eval()
         
         samples_dataset = WhateverPredDs(dfs)
@@ -247,7 +250,7 @@ class NeuralSampler(Sampler):
         return cat_features, cats_size, padding_indexes
 
     def fit(self, xs, ys):
-        self.eps = max(0.005, self.eps - 1)
+        self.eps = max(0.005, self.eps - 0.1)
         self.train_cnt += 1
 
         if self.allow_train and self.train_cnt % self.n_train == 0:
